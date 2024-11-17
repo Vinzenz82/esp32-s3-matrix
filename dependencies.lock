@@ -1,0 +1,15 @@
+dependencies:
+  idf:
+    component_hash: null
+    source:
+      type: idf
+    version: 5.2.1
+  zorxx/neopixel:
+    component_hash: eb2457ac2b7fca04be1834cf3af7a901f72969918a30ce68a1c1b0c160306201
+    source:
+      service_url: https://api.components.espressif.com/
+      type: service
+    version: 1.0.10
+manifest_hash: faa4ddc8aab96ffbc176f75611bba72248edef6715d43cae4fe71b17dac15567
+target: esp32s3
+version: 1.0.0
