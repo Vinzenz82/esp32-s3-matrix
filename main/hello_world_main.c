@@ -19,6 +19,8 @@
 #include "lwip/dns.h"
 #include "lwip/netdb.h"
 
+#include "uthash.h"
+
 #include "mqtt_client.h"
 
 #include "font8x8_ib8x8u.h"
@@ -80,7 +82,12 @@
 
 #define CONFIG_BROKER_URL "mqtt://192.168.1.5"
 esp_mqtt_client_handle_t client;
-int16_t glob_temperature = 0;
+uint8_t mqtt_string_temperature[10] = {0};
+uint8_t mqtt_string_temperature_length = 0;
+uint8_t mqtt_string_special_char = 0x01;
+uint8_t mqtt_string_message[255] = {0};
+uint8_t mqtt_string_message_length = 0;
+const uint8_t message_start_sign[1] = {0x10};
 
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t s_wifi_event_group;
@@ -92,6 +99,16 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_FAIL_BIT      BIT1
 
 static int s_retry_num = 0;
+
+// Struktur für die Hash-Map-Einträge
+typedef struct {
+    char topic[64];                // Key: Topic-Name
+    void (*callback)(const char *, const char *, int); // Value: Callback-Funktion
+    UT_hash_handle hh;             // UTHash-Handle
+} topic_handler_t;
+
+// Globale Hash-Map
+static topic_handler_t *handlers = NULL;
 
 
 static void event_handler(void* arg, esp_event_base_t event_base,
@@ -189,6 +206,80 @@ static void log_error_if_nonzero(const char *message, int error_code)
     }
 }
 
+/*--------------------- MQTT -----------------------------------*/
+// Callback-Funktionen für verschiedene Topics
+void handle_topic1(const char *topic, const char *data, int data_len) {
+    printf("Handling topic1: %s, data: %.*s\n", topic, data_len, data);
+
+
+    if( data_len <= 10 ) {
+        strncpy((char*)mqtt_string_temperature, data, data_len);
+        mqtt_string_temperature_length = (data_len + 1);
+        mqtt_string_temperature[data_len] = mqtt_string_special_char; // add special symbol
+    }
+}
+
+void handle_topic2(const char *topic, const char *data, int data_len) {
+    printf("Handling topic2: %s, data: %.*s\n", topic, data_len, data);
+
+    if(strncmp( data, "1F600", data_len) == 0) {
+        mqtt_string_special_char = 1;
+    }
+    else if(strncmp( data, "1F641", data_len) == 0) { 
+        mqtt_string_special_char = 224;
+    }
+    else if(strncmp( data, "02764", data_len) == 0) { 
+        mqtt_string_special_char = 225;
+    }
+    else {
+        mqtt_string_special_char = '?';
+    }
+
+    mqtt_string_temperature[mqtt_string_temperature_length-1] = mqtt_string_special_char;
+}
+
+void handle_topic3(const char *topic, const char *data, int data_len) {
+    uint16_t len = (data_len < 255) ? data_len : 254;
+    
+    printf("Handling topic3: %s, data: %.*s\n", topic, data_len, data);
+
+
+    memcpy(&mqtt_string_message, data, len);
+    mqtt_string_message_length = len;
+}
+
+void handle_default(const char *topic, const char *data, int data_len) {
+    printf("Unhandled topic: %s, data: %.*s\n", topic, data_len, data);
+}
+
+// Funktion, um eine neue Topic-Callback-Zuordnung hinzuzufügen
+void add_topic_handler(const char *topic, void (*callback)(const char *, const char *, int)) {
+    topic_handler_t *entry = (topic_handler_t *)malloc(sizeof(topic_handler_t));
+    if (!entry) {
+        printf("Failed to allocate memory for topic handler\n");
+        return;
+    }
+    strncpy(entry->topic, topic, sizeof(entry->topic) - 1);
+    entry->topic[sizeof(entry->topic) - 1] = '\0'; // Null-terminieren
+    entry->callback = callback;
+    HASH_ADD_STR(handlers, topic, entry); // Topic hinzufügen
+}
+
+// Funktion, um ein Topic zu suchen und das passende Callback aufzurufen
+void dispatch_topic(const char *topic, int topic_len, const char *data, int data_len) {
+    char topic_str[64];
+    snprintf(topic_str, sizeof(topic_str), "%.*s", topic_len, topic); // Topic extrahieren
+
+    topic_handler_t *entry = NULL;
+    HASH_FIND_STR(handlers, topic_str, entry); // Topic in der Hash-Map suchen
+
+    if (entry && entry->callback) {
+        entry->callback(topic_str, data, data_len);
+    } else {
+        handle_default(topic_str, data, data_len); // Default-Handler
+    }
+}
+
 /*
  * @brief Event handler registered to receive MQTT events
  *
@@ -239,8 +330,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG, "MQTT_EVENT_DATA");
         printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
         printf("DATA=%.*s\r\n", event->data_len, event->data);
-        glob_temperature++;
-        if(glob_temperature > 223) glob_temperature = 0;
+
+        // Weiterleitung an das passende Callback
+        dispatch_topic(event->topic, event->topic_len, event->data, event->data_len);
+
         break;
     case MQTT_EVENT_ERROR:
         ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -271,7 +364,7 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(client);
 }
 
-static bool drawChars(uint8_t value[], uint8_t count)
+static bool drawChars(const uint8_t value[], const uint8_t count, const uint32_t rgb)
 {
    tNeopixelContext neopixel = neopixel_Init(PIXEL_COUNT, NEOPIXEL_PIN);
    tNeopixel pixel_clear[PIXEL_COUNT] = {0};
@@ -287,6 +380,7 @@ static bool drawChars(uint8_t value[], uint8_t count)
    // set index for each pixel
    for (int i = 0; i < PIXEL_COUNT; i++) {
       pixel[i].index = i; 
+      //pixel[i].index = (i % 8) * 8 + (i / 8); // rotated by 90
       pixel_clear[i].index = i;
    }
 
@@ -301,21 +395,33 @@ static bool drawChars(uint8_t value[], uint8_t count)
       for(int r = 0; r < 8; r++) {
          for (int i = 0; i < 8; i++) {
             if((font_index[r] & (1 << i)) != 0 ) {
-               pixel[(7-i)+(r*8)].rgb = NP_RGB(0, 25, 0);
+               pixel[(7-i)+(r*8)].rgb = rgb;
             }
          }
       }  
 
-      // clear the screen
-      neopixel_SetPixel(neopixel, &pixel_clear[0], ARRAY_SIZE(pixel_clear));
-      vTaskDelay(pdMS_TO_TICKS(100));
+        // rotate by 180 deg
+        for (int i = 0; i < 32; i++) {
+            // Swap element at index i with its counterpart at index 63 - i
+            uint32_t temp = pixel[i].rgb;
+            pixel[i].rgb = pixel[63 - i].rgb;
+            pixel[63 - i].rgb = temp;
+        }
+
+      // clear the screen if same char will be print
+      if( (idx_char > 0) && ( value[idx_char - 1] == value[idx_char] ) ) {
+        neopixel_SetPixel(neopixel, &pixel_clear[0], ARRAY_SIZE(pixel_clear));
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
 
       // draw the char
       for(int i = 0; i < ARRAY_SIZE(pixel); ++i)
       {
-         neopixel_SetPixel(neopixel, &pixel[i], 1); 
-         vTaskDelay(pdMS_TO_TICKS(50));
+         int index = (i % 8) * 8 + (i / 8);
+         neopixel_SetPixel(neopixel, &pixel[index], 1); 
+         vTaskDelay(pdMS_TO_TICKS(15));
       }
+      vTaskDelay(pdMS_TO_TICKS(350));
 
       // clear the buffer
       // set index for each pixel
@@ -328,9 +434,20 @@ static bool drawChars(uint8_t value[], uint8_t count)
    return true;
 }
 
+// Cleanup-Funktion zum Freigeben der Hash-Map
+void cleanup_topic_handlers() {
+    topic_handler_t *current, *tmp;
+    HASH_ITER(hh, handlers, current, tmp) {
+        HASH_DEL(handlers, current);
+        free(current);
+    }
+}
+
 void app_main(void)
 {
    int msg_id;
+   TickType_t start_tick, end_tick;
+   uint32_t elapsed_time_ms;
 
    // set log levels
    esp_log_level_set("*", ESP_LOG_INFO);
@@ -354,20 +471,45 @@ void app_main(void)
    wifi_init_sta();
 
    //start mqtt client
+   add_topic_handler("/response/value", handle_topic1);
+   add_topic_handler("/messages/1/1", handle_topic2);
+   add_topic_handler("/messages/2/1", handle_topic3);
+
    mqtt_app_start();
    msg_id = esp_mqtt_client_subscribe(client, "/response/value", 1);
+   ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+   msg_id = esp_mqtt_client_subscribe(client, "/messages/1/1", 1);
+   ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+   msg_id = esp_mqtt_client_subscribe(client, "/messages/2/1", 1);
    ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
    for(;;)
    {
-      msg_id = esp_mqtt_client_publish(client, "/request/value", "1", 0, 1, 0);
-      ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+        start_tick = xTaskGetTickCount();
 
-      //drawChars(1, glob_temperature);
-      uint8_t chars[4] = {(uint8_t)'+',(uint8_t)'5', (uint8_t)'.', (uint8_t)'2'};
-      drawChars(&chars[0], 4);
+        // initiate a new update via MQTT
+        msg_id = esp_mqtt_client_publish(client, "/request/value", "1", 0, 1, 0);
+        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
 
-      vTaskDelay(pdMS_TO_TICKS(1000*60));
-      
+        do{
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            
+            if( mqtt_string_message_length > 0 ) {
+                drawChars(&message_start_sign[0], 1, NP_RGB(0, 0, 20));
+                drawChars(&mqtt_string_message[0], mqtt_string_message_length, NP_RGB(20, 2, 20));
+            }
+            else {
+                drawChars(&mqtt_string_temperature[0], mqtt_string_temperature_length, NP_RGB(0, 25, 0)); 
+            }
+            
+            end_tick = xTaskGetTickCount();
+            elapsed_time_ms = (end_tick - start_tick) * portTICK_PERIOD_MS;
+        } while( elapsed_time_ms < (59 * 1000));
+        if(elapsed_time_ms < (60 * 1000)) {
+            vTaskDelay(pdMS_TO_TICKS((60 * 1000) - elapsed_time_ms));
+        }
    }
+
+    // Cleanup-Logik (z. B. vor dem Beenden der Anwendung)
+    cleanup_topic_handlers();
 }
