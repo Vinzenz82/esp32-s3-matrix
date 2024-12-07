@@ -11,6 +11,8 @@
     "array": "c",
     "string": "c",
     "string_view": "c",
-    "span": "c"
+    "span": "c",
+    "*.tpp": "cpp",
+    "event_groups.h": "c"
   }
 }

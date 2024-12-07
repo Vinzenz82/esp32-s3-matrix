@@ -98,6 +98,14 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 
+
+
+//TEST
+extern void QMI8658_Init( void );
+extern void QMI8658_Update( void );
+extern QueueHandle_t gpio_evt_queue;
+//
+
 static int s_retry_num = 0;
 
 // Struktur für die Hash-Map-Einträge
@@ -466,6 +474,9 @@ void app_main(void)
    }
    ESP_ERROR_CHECK(ret);
 
+
+QMI8658_Init();
+
    //Initialize WIFI
    ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
    wifi_init_sta();
@@ -483,6 +494,7 @@ void app_main(void)
    msg_id = esp_mqtt_client_subscribe(client, "/messages/2/1", 1);
    ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
+   uint32_t io_num;
    for(;;)
    {
         start_tick = xTaskGetTickCount();
@@ -493,6 +505,11 @@ void app_main(void)
 
         do{
             vTaskDelay(pdMS_TO_TICKS(1000));
+
+            if (xQueueReceive(gpio_evt_queue, &io_num, 0)) {
+                printf("GPIO[%"PRIu32"] intr, val: %d\n", io_num, gpio_get_level((gpio_num_t)io_num));
+                QMI8658_Update();
+            }
             
             if( mqtt_string_message_length > 0 ) {
                 drawChars(&message_start_sign[0], 1, NP_RGB(0, 0, 20));

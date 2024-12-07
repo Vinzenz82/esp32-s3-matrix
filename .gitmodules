@@ -1,3 +1,6 @@
 [submodule "components/uthash"]
 	path = components/uthash
 	url = https://github.com/troydhanson/uthash.git
+[submodule "managed_components/SensorLib"]
+	path = managed_components/SensorLib
+	url = https://github.com/lewisxhe/SensorLib.git
